@@ -341,7 +341,7 @@ __asm__(
 // with the given data pointer as an argument.
 // Returns true on success, false on failure.
 // The calling thread does not participate in the group.
-b32 thread_create_group(u32 thread_count, void(*entry)(), void *entry_data) {
+b32 thread_create_group(u32 thread_count, void(*entry)(void*), void *entry_data) {
 	u64 core_count = thread_core_count();
 	u64 shared_memory_size = 3 * CACHE_LINE_SIZE;
 	u64 thread_context_size = thread_count * sizeof(ThreadContext);
