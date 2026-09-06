@@ -1,7 +1,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdarg.h>
-#include <assert.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -14,10 +14,10 @@
 #include <fcntl.h>
 
 // Number of u64s to sort - increase to make the CPU do more work
-#define SORT_COUNT 200000000
+#define SORT_COUNT 20000
 
 // Use 0 to default to [machine's number of cores] - 2
-#define THREADS_TO_SPAWN 1
+#define THREADS_TO_SPAWN 12
 
 typedef char i8;
 typedef short i16;
@@ -38,6 +38,13 @@ void println(u8 *text, ...);
 // Initialized in main
 u64 CACHE_LINE_SIZE = 0;
 u64 DEFAULT_PAGE_SIZE = 0;
+
+void assert(b32 condition) {
+	if (!condition) {
+		println("Assert Failed");
+		exit(0);
+	}
+}
 
 #include "util.c"
 #include "arena.c"
@@ -206,6 +213,8 @@ void thread_entry(void *unused) {
 void main() {
 	CACHE_LINE_SIZE = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
 	DEFAULT_PAGE_SIZE = sysconf(_SC_PAGESIZE);
+
+	printf("You have %d cores\n", thread_core_count());
 
 	u64 cores = THREADS_TO_SPAWN;
 	if (0 == cores) {

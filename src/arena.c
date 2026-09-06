@@ -103,7 +103,7 @@ void * arena_alloc_aligned_uninit(Arena *arena, u64 size, u64 alignment) {
 
 			u64 allocation_size = data_size + page_size;
 			candidate = mmap(0, allocation_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-			assert(0 != MAP_FAILED); // allocation failure is a crashing error
+			assert(candidate != MAP_FAILED); // allocation failure is a crashing error
 			candidate->allocation_size = allocation_size;
 			candidate->data_size = data_size;
 			candidate->allocation = (u8*)candidate;
