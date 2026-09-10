@@ -14,10 +14,7 @@
 #include <fcntl.h>
 
 // Number of u64s to sort - increase to make the CPU do more work
-#define SORT_COUNT 20000
-
-// Use 0 to default to [machine's number of cores] - 2
-#define THREADS_TO_SPAWN 12
+#define SORT_COUNT 400000000
 
 typedef char i8;
 typedef short i16;
@@ -33,7 +30,7 @@ typedef u32 b32;
 #define true 1
 #define false 0
 
-void println(u8 *text, ...);
+void println(char *text, ...);
 
 // Initialized in main
 u64 CACHE_LINE_SIZE = 0;
@@ -61,7 +58,7 @@ len should be the number of u64s in the buffer.
 Be aware that radix sort requires scratch memory of equal size to the
 input memory, which will be allocated on thread 0's arena.
 */
-void radix_sort_64(volatile u64 *data, u64 len) {
+void radix_sort_64(u64 *data, u64 len) {
 	ArenaMark mark = arena_mark(thread_arena());
 
 	/*
@@ -75,7 +72,7 @@ void radix_sort_64(volatile u64 *data, u64 len) {
 	*/
 
 	// Working memory, integers are copied between scratch and data as the sort proceeds.
-	volatile u64 *scratch = thread_alloc_shared(sizeof(u64) * len);
+	u64 *scratch = thread_alloc_shared(sizeof(u64) * len);
 
 	// Each thread stores its local digit frequency counts in its own memory,
 	// which is shared with other threads via these shared arrays.
@@ -143,10 +140,12 @@ void radix_sort_64(volatile u64 *data, u64 len) {
 		}
 		thread_barrier();
 
-		volatile u64 *temp = scratch;
+		u64 *temp = scratch;
 		scratch = data;
 		data = temp;
 	}
+
+	thread_barrier();
 
 	arena_restore(mark);
 }
@@ -177,7 +176,9 @@ void thread_entry(void *unused) {
 	close(rand_source);
 
 	// This array is shared across all threads
-	u64 *data = thread_alloc_shared(sizeof(u64) * SORT_COUNT);
+	u64 size = sizeof(u64) * SORT_COUNT;
+	if (0 == thread_id()) println("Allocating memory: %l bytes, %lkb, %lmb", size, size / 1024, size / 1024 / 1024);
+	u64 *data = thread_alloc_shared(size);
 
 	// Fill memory with random data
 	// thread_slice gives each thread a different segment of memory to fill
@@ -210,21 +211,36 @@ void thread_entry(void *unused) {
 
 
 
-void main() {
+int main(int argc, char **argv) {
 	CACHE_LINE_SIZE = sysconf(_SC_LEVEL1_DCACHE_LINESIZE);
 	DEFAULT_PAGE_SIZE = sysconf(_SC_PAGESIZE);
 
-	printf("You have %d cores\n", thread_core_count());
+	printf("You have %ld cores\n", thread_core_count());
 
-	u64 cores = THREADS_TO_SPAWN;
-	if (0 == cores) {
-		cores = thread_core_count();
-		if (2 < cores) cores -= 2;
+	u64 thread_count = 0;
+
+	if (2 <= argc) {
+		char *thread_count_string = argv[1];
+		thread_count = atoi(thread_count_string);
 	}
 
-	printf("Spawning %d threads\n", cores);
+	if (0 == thread_count) {
+		// the radix sort is heavily bandwidth constrained, so it doesn't do any good to run multiple
+		// threads on the same physical core. This is task dependent, though, and some tasks may benefit
+		// from multiple threads on the same physical core.
+		thread_count = thread_core_count() / 2;
+	}
+
+	if (0 == thread_count) {
+		// Running on a single core system?
+		thread_count = 1;
+	}
+
+	printf("Spawning %ld threads\n", thread_count);
 
 	thread_storage_init();
-	thread_create_group(cores, thread_entry, 0);
+	thread_create_group(thread_count, thread_entry, 0);
 	syscall(SYS_exit, 0); // exit only the current thread, letting the others complete
+
+	return 0;
 }

@@ -5,7 +5,18 @@ values to other threads with thread_sync*, and dividing work up among themselves
 equally with thread_slice, or dynamically with thread_queue.
 */
 
+// Size of the broadcast memory used for sharing information between threads.
+// This limits how much data can be copied between threads in one go.
+#define THREAD_BROADCAST_SIZE CACHE_LINE_SIZE
 
+// Size in bytes of the thread local memory
+// Stores an array of pointers set and retrieved by index
+// Each thread has a pointer to an allocation of this size, stored in the gs register,
+// which it uses to retrieve a thread-local pointer from by index.
+#define THREAD_STORAGE_SIZE 4096
+
+// Index in the thread's local storage of the thread context
+#define THREAD_STORAGE_CONTEXT ((THREAD_STORAGE_SIZE / sizeof(void*)) - 1)
 
 
 
@@ -16,13 +27,8 @@ The group threading system only uses the THREAD_STORAGE_CONTEXT index, so all ot
 available to user code.
 */
 
-#define THREAD_STORAGE_SIZE 4096
-
-// thread local storage index of a thread's ThreadContext
-#define THREAD_STORAGE_CONTEXT ((THREAD_STORAGE_SIZE / sizeof(void*)) - 1)
-
 // Allocate memory for use with thread_storage_set_page
-void* thread_storage_alloc() {
+void* thread_storage_alloc(void) {
 	void *tls_memory = mmap(0, THREAD_STORAGE_SIZE, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
 	assert(0 != tls_memory); // can't continue without this
 	return tls_memory;
@@ -37,7 +43,7 @@ void thread_storage_set_page(void* tls_memory) {
 
 // Initialize the thread-local storage system
 // Must be called before using thread_storage_set or thread_storage_get
-void thread_storage_init() {
+void thread_storage_init(void) {
 	thread_storage_set_page(thread_storage_alloc());
 }
 
@@ -70,12 +76,11 @@ typedef struct {
 	Arena arena;
 
 	// These point to memory shared across all threads in the group
-	volatile u32 *join_barrier; // used in thread_barrier to block until all threads have reached the call
-	volatile u32 *join_barrier_alt; // see note at end of thread_barrier() function.
-	volatile u64 *broadcast_memory; // shared memory to copy data between threads
+	u32 *join_barrier; // used in thread_barrier to block until all threads have reached the call
+	u32 *join_barrier_alt; // see note at end of thread_barrier() function.
+	u64 *broadcast_memory; // shared memory to copy data between threads
 
 	// This data is used to setup the thread, then not used again
-	u32 core; // core to pin this thread to
 	void *thread_storage_memory;
 	void (*entry)(void*);
 	void *entry_data;
@@ -88,7 +93,7 @@ ThreadContext STATIC_CONTEXT = { .thread_count = 1 };
 
 
 // Retrieve the current thread's context
-ThreadContext* thread_context() {
+ThreadContext* thread_context(void) {
 	ThreadContext *ctx = thread_storage_get(THREAD_STORAGE_CONTEXT);
 	if (0 == ctx) return &STATIC_CONTEXT;
 	else return ctx;
@@ -96,46 +101,37 @@ ThreadContext* thread_context() {
 
 
 // Convenience method, retrieve the current thread's id
-u32 thread_id() {
+u32 thread_id(void) {
 	return thread_context()->thread_id;
 }
 
 
 // Convenience method, retrieve the current group's thread count
-u32 thread_count() {
+u32 thread_count(void) {
 	return thread_context()->thread_count;
 }
 
 // Convenience method, retrieve the current thread's arena
-Arena * thread_arena() {
+Arena * thread_arena(void) {
 	return &thread_context()->arena;
 }
 
 
 
 // Get the number of cores on this system
-u64 thread_core_count() {
+u64 thread_core_count(void) {
 	cpu_set_t set;
 	CPU_ZERO(&set);
-	if (sched_getaffinity(0, sizeof set, &set) != 0) return -1;
+	if (sched_getaffinity(0, sizeof set, &set) != 0) return 1;
 	return CPU_COUNT(&set);
 }
 
 
-// Pin current thread to the given cpu
-u64 thread_core_pin(u64 cpu) {
-	cpu_set_t set;
-	CPU_ZERO(&set);
-	CPU_SET(cpu, &set);
-	if (sched_setaffinity(0, sizeof set, &set) != 0) return -1;
-	return 0;
-}
-
 
 // Pause the current thread until all threads reach the barrier
-#define thread_barrier() thread_barrier_impl(__FILE__, __LINE__, __FUNCTION__)
+#define thread_barrier() thread_barrier_impl(__FILE__, __LINE__, __func__)
 
-void thread_barrier_impl(const u8 *file, u32 line, const u8 *function) {
+void thread_barrier_impl(const char *file, u32 line, const char *function) {
 	ThreadContext *ctx = thread_context();
 	ctx->barrier_calls += 1;
 	if (1 == ctx->thread_count) return;
@@ -147,13 +143,10 @@ void thread_barrier_impl(const u8 *file, u32 line, const u8 *function) {
 		// Reset the barrier
 		*ctx->join_barrier = 0;
 
-		// Wakeup other threads
-		// todo: optimize wakeup - other threads can indicate whether they went to sleep,
-		// and we can do the syscall only if they did.
-		// For now this is the obviously-correct implementation
-		__sync_synchronize();
 		u64 result = syscall(SYS_futex, ctx->join_barrier, FUTEX_WAKE, ctx->thread_count - 1);
-		assert(0 <= result); // If this failed, the threads may be out of sync and there's no recovery.
+
+		// If this failed, the threads may be out of sync and there's no recovery.
+		assert(0 <= result);
 	}
 
 	// Otherwise threads still need to reach the barrier
@@ -161,8 +154,7 @@ void thread_barrier_impl(const u8 *file, u32 line, const u8 *function) {
 	// already run, woken all the other threads, and everyone else
 	// has already continued and are waiting for us at the next barrier.)
 	else {
-		// Should profile in a real application.
-		// The Windows Win32 barrier loops 2000 times, so that's probably good as a default.
+		// I haven't measured this spin-loop constant, so a different number may be better.
 		i64 loops = 2000;
 
 		while (1) {
@@ -191,9 +183,6 @@ void thread_barrier_impl(const u8 *file, u32 line, const u8 *function) {
 				loops -= 1;
 			}
 		}
-
-		// Prevent re-ordering the swaps below prior to this if branch
-		__sync_synchronize();
 	}
 
 	/*
@@ -207,48 +196,46 @@ void thread_barrier_impl(const u8 *file, u32 line, const u8 *function) {
 		7. Now thread 1 is still at the first thread_barrier, but all the other threads are blocking on the *next* thread_barrier.
 	To resolve this, each thread swaps join_barrier and join_barrier_alt at the end of each thread_barrier call.
 	*/
-	volatile u32 *temp = ctx->join_barrier;
+	u32 *temp = ctx->join_barrier;
 	ctx->join_barrier = ctx->join_barrier_alt;
 	ctx->join_barrier_alt = temp;
 }
 
-// Copy 64 bits of data from the given thread to all threads
-void thread_sync64(u32 thread_id, u64 *value) {
+void thread_sync(u32 thread_id, void *value, u64 len) {
+	if (THREAD_BROADCAST_SIZE < len) {
+		error("called sync with a value too large");
+		len = THREAD_BROADCAST_SIZE;
+	}
+
 	ThreadContext *tls = thread_context();
-	if (tls->thread_id == thread_id) *tls->broadcast_memory = *value;
+	if (tls->thread_id == thread_id) memcpy(tls->broadcast_memory, value, len);
 	thread_barrier();
-	if (tls->thread_id != thread_id) *value = *tls->broadcast_memory;
+	if (tls->thread_id != thread_id) memcpy(value, tls->broadcast_memory, len);
 	thread_barrier();
 }
 
-// Copy 32 bits of data from the given thread to all threads
-void thread_sync32(u32 thread_id, u32 *value) {
-	ThreadContext *tls = thread_context();
-	if (tls->thread_id == thread_id) *tls->broadcast_memory = *value;
-	thread_barrier();
-	if (tls->thread_id != thread_id) *value = *tls->broadcast_memory;
-	thread_barrier();
+
+// Convenience for thread_sync
+void thread_sync_u64(u32 thread_id, u64 *value) {
+	thread_sync(thread_id, value, sizeof(*value));
 }
 
-// Convenience wrapper for thread_sync32
+// Convenience for thread_sync
+void thread_sync_u32(u32 thread_id, u32 *value) {
+	thread_sync(thread_id, value, sizeof(*value));
+}
+
+// Convenience for thread_sync
 void thread_sync_f32(u32 thread_id, f32 *value) {
-	thread_sync32(thread_id, (u32*)value);
+	thread_sync(thread_id, value, sizeof(*value));
 }
 
-// Convenience wrapper for thread_sync64
-void thread_sync_ptr(u32 thread_id, void *value) {
-	thread_sync64(thread_id, (u64*)value);
+// Convenience for thread_sync
+void thread_sync_ptr(u32 thread_id, void *value_void) {
+	void **value = (void**)value_void;
+	thread_sync(thread_id, value, sizeof(*value));
 }
 
-// Sync bytes from one thread to the others
-#define thread_sync_bytes(thread_id, memory, size) thread_sync_bytes_impl(thread_id, memory, size, __FILE__, __LINE__, __FUNCTION__)
-void thread_sync_bytes_impl(u32 thread_id, void *memory, u64 size, const u8 *file, u64 line, const u8 *function) {
-	ThreadContext *tls = thread_context();
-	if (tls->thread_id == thread_id) *tls->broadcast_memory = (u64)memory;
-	thread_barrier_impl(file, line, function);
-	if (tls->thread_id != thread_id) memcpy(memory, (void*)*tls->broadcast_memory, size);
-	thread_barrier_impl(file, line, function);
-}
 
 
 
@@ -310,7 +297,6 @@ void thread_setup_entry(void *void_context) {
 	ThreadContext *ctx = void_context;
 	syscall(SYS_arch_prctl, ARCH_SET_GS, ctx->thread_storage_memory);
 	thread_storage_set(THREAD_STORAGE_CONTEXT, ctx);
-	thread_core_pin(ctx->core);
 	thread_barrier(); // prevent threads from proceeding unless all threads in the group are ready
 	ctx->entry(ctx->entry_data);
 	syscall(SYS_exit, 0);
@@ -384,13 +370,12 @@ b32 thread_create_group(u32 thread_count, void(*entry)(void*), void *entry_data)
 		ThreadContext *ctx = contexts + i;
 		ctx->thread_id = i;
 		ctx->thread_count = thread_count;
-		ctx->join_barrier     = (u32*)(group_memory + CACHE_LINE_SIZE * 0);
-		ctx->join_barrier_alt = (u32*)(group_memory + CACHE_LINE_SIZE * 1);
-		ctx->broadcast_memory = (u64*)(group_memory + CACHE_LINE_SIZE * 2);
+		ctx->join_barrier     = join_barrier;
+		ctx->join_barrier_alt = join_barrier_alt;
+		ctx->broadcast_memory = broadcast_memory;
 		ctx->thread_storage_memory = thread_storage_alloc();
 		ctx->entry = entry;
 		ctx->entry_data = entry_data;
-		ctx->core = i % core_count;
 
 		struct clone_args clone_args = {0};
 		clone_args.flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
@@ -401,6 +386,8 @@ b32 thread_create_group(u32 thread_count, void(*entry)(void*), void *entry_data)
 		i64 result = clone3_jmp(&clone_args, sizeof(clone_args), thread_setup_entry, ctx);
 		assert(0 < result);
 	}
+
+	return true;
 }
 
 
@@ -439,7 +426,7 @@ u64* thread_gather64(u64 value, Arena *arena) {
 
 
 struct JobQueue {
-	volatile i32 *remaining;
+	i32 *remaining;
 	i32 allocated_from;
 	i32 allocated_to;
 };
@@ -449,7 +436,7 @@ struct JobQueue {
 // on the first call to thread_queue_next, and shortcut the entire synchronization
 // mechanism if the request amount is less than the total.
 struct JobQueue thread_queue(u32 count, Arena *arena) {
-	volatile i32 *remaining = 0;
+	i32 *remaining = 0;
 	if (0 == thread_id()) {
 		remaining = arena_alloc(arena, CACHE_LINE_SIZE);
 		*remaining = count;

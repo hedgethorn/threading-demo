@@ -47,7 +47,7 @@ u64 u64_to_ascii(u64 value, u8 buffer[20], u64 radix) {
 }
 
 
-void println(u8 *text, ...) {
+void println(char *text, ...) {
 	ThreadContext *ctx = thread_context();
 
 	va_list args;
@@ -141,7 +141,7 @@ void println(u8 *text, ...) {
 			} break;
 
 			case 's':  {
-				u8 *string = va_arg(args, u8*);
+				char *string = va_arg(args, char*);
 				u64 len = strlen(string);
 				assert(output_len + len <= PRINTLN_BUFFER_SIZE);
 				memcpy(output + output_len, string, len);

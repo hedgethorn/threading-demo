@@ -8,14 +8,14 @@
 /*
 Print message with the source location of the message
 */
-#define trace(msg) trace_impl(msg, __FILE__, __LINE__, __FUNCTION__)
-#define error(msg) error_impl(msg, __FILE__, __LINE__, __FUNCTION__)
+#define trace(msg) trace_impl(msg, __FILE__, __LINE__, __func__)
+#define error(msg) error_impl(msg, __FILE__, __LINE__, __func__)
 
-void trace_impl(const u8 *message, const u8 *file, const u64 line, const u8 *function) {
+void trace_impl(const char *message, const char *file, const u64 line, const char *function) {
 	println("\x1b[36;1mtrace\x1b[0m [\x1b[36m%s:%l\x1b[0m] \x1b[35m%s()\x1b[0m: %s", file, line, function, message);
 }
 
-void error_impl(const u8 *message, const u8 *file, const u64 line, const u8 *function) {
+void error_impl(const char *message, const char *file, const u64 line, const char *function) {
 	println("\x1b[31;1merror\x1b[0m [\x1b[31;1m%s:%l\x1b[0m] \x1b[35m%s()\x1b[0m: %s", file, line, function, message);
 }
 
@@ -112,7 +112,7 @@ void sys_cpuid(u32 leaf, u32 subleaf, u32 *eax, u32 *ebx, u32 *ecx, u32 *edx) {
 
 // Read the frequency of the timestamp counter using cpuid
 // This only works on Skylake and later.
-u64 get_tsc_frequency() {
+u64 get_tsc_frequency(void) {
 	u32 eax, ebx, ecx, edx;
 
 	sys_cpuid(0x15, 0, &eax, &ebx, &ecx, &edx);

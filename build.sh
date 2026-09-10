@@ -3,7 +3,7 @@
 mkdir -p target
 
 build() {
-	gcc src/main.c -o target/main -g
+	gcc src/main.c -o target/main -g -Wall -Wpedantic
 }
 
 run() {
